@@ -22,10 +22,9 @@ MAX_CANDLES_PER_REQUEST = 4999
 WAVE_PERIOD = 34
 WAVE_LOOKBACK = 8
 
-# Igual ao painel do Pine
-HTF_FLAT = 0.9      # 4h ou acima
+HTF_FLAT = 0.9
 HTF_STRONG = 2.0
-LTF_FLAT = 0.40     # abaixo de 4h
+LTF_FLAT = 0.40
 LTF_STRONG = 1.50
 
 THRESH = {
@@ -49,7 +48,11 @@ def notify(text):
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+            },
             timeout=15,
         )
         r.raise_for_status()
@@ -190,7 +193,7 @@ def analyze(df, tf):
     pos, pos_label = price_vs_wave(last)
     prev_pos, _ = price_vs_wave(prev)
     flat, strong = cuts_for(tf)
-    grupo = "4h+" if is_htf(tf) else "<4h"
+    grupo = "4h+" if is_htf(tf) else "LTF"
 
     pullback_buy = (
         prev_pos == "ABOVE"
@@ -253,12 +256,12 @@ def discover_1d_start():
     start_time = end_time - 20 * 365 * 24 * 60 * 60 * 1000
     df, price, ts = get_candles("1d", start_time, end_time)
     first_ts = int(df.iloc[0]["t"])
-    print(f"📅 Histórico 1d desde: {df.iloc[0]['datetime'].strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"Historico 1d desde: {df.iloc[0]['datetime'].strftime('%Y-%m-%d %H:%M UTC')}")
     return first_ts, df, price, ts
 
 
 def run_scan():
-    print(f"\n===== {ASSET_NAME} | RELÓGIO RAGHEE =====\n")
+    print(f"\n===== {ASSET_NAME} | RELOGIO RAGHEE =====\n")
     results = {}
 
     try:
@@ -299,18 +302,18 @@ def run_scan():
             horario = d["current_time"]
 
         print(f"\n{tf} | grupo {d['grupo']} | flat={d['flat']} strong={d['strong']}")
-        print(f"🕯️ {d['candles']} | {d['first']} → {d['last']}")
-        print(f"💰 {d['current_price']} | {d['current_time']}")
-        print(f"🕒 {d['label']} | {d['pos_label']}")
+        print(f"candles {d['candles']} | {d['first']} -> {d['last']}")
+        print(f"{d['current_price']} | {d['current_time']}")
+        print(f"{d['label']} | {d['pos_label']}")
         print(f"Onda H/M/L: {d['w_high']} / {d['w_mid']} / {d['w_low']}")
-        print(f"slope={d['slope']}% | ângulo={d['angle']}°")
+        print(f"slope={d['slope']}% | angulo={d['angle']}")
         print(f"Setup: {d['setup']} | bias={d['bias']}")
 
         blocos.append(
             f"\n<b>{tf}</b> ({d['grupo']} {d['flat']}/{d['strong']})\n"
             f"{d['label']}\n"
             f"{d['pos_label']}\n"
-            f"slope={d['slope']}% | ângulo={d['angle']}°\n"
+            f"slope={d['slope']}% | angulo={d['angle']}\n"
             f"{d['setup']}"
         )
 
@@ -330,29 +333,29 @@ def run_scan():
         blocked = True
 
     if blocked:
-        sinal = "🟡 AGUARDAR — 1D bloqueando"
+        sinal = "AGUARDAR — 1D bloqueando"
     elif bullish(h4_regime) and h1_ok:
         stop = h1.get("stop")
         liq = preco * (1 - 1 / LEVERAGE + MAINT_MARGIN) if preco else 0
         risco = ((preco - stop) / preco * 100) if preco and stop else 0
         sinal = (
-            "🟢 COMPRA — 4h UP_STRONG + pullback 1h\n"
+            "COMPRA — 4h UP_STRONG + pullback 1h\n"
             f"Stop 1h: {stop}\n"
             f"Trail: W_LOW 1h = {h1.get('w_low')}\n"
             f"Liq. ~{LEVERAGE:.0f}x: {liq:.6f}\n"
-            f"Risco até o stop: {risco:.2f}%"
+            f"Risco ate o stop: {risco:.2f}%"
         )
     elif (not ONLY_BUY) and bearish(h4_regime) and h1_sell:
-        sinal = "🔴 VENDA — 4h DOWN_STRONG + pullback 1h"
+        sinal = "VENDA — 4h DOWN_STRONG + pullback 1h"
     else:
-        sinal = "🟡 AGUARDAR"
+        sinal = "AGUARDAR"
 
     print("\n=================================")
     print(sinal)
     notify(
-        f"<b>{ASSET_NAME} RELÓGIO RAGHEE</b>\n"
+        f"<b>{ASSET_NAME} RELOGIO RAGHEE</b>\n"
         f"{sinal}\n"
-        f"Preço: {preco} | {horario}"
+        f"Preco: {preco} | {horario}"
         + "".join(blocos)
     )
     print("=================================\n")
