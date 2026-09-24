@@ -8,7 +8,6 @@ URL = "https://api.hyperliquid.xyz/info"
 COIN = "@272"
 ASSET_NAME = "ZCASH"
 
-MAX_CANDLES_PER_REQUEST = 4999
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -19,8 +18,10 @@ INTERVAL_MS = {
     "1d": 24 * 60 * 60 * 1000,
 }
 
+MAX_CANDLES_PER_REQUEST = 4999
 WAVE_PERIOD = 34
 WAVE_LOOKBACK = 8
+
 HTF_FLAT = 0.9
 HTF_STRONG = 2.0
 LTF_FLAT = 0.40
@@ -93,25 +94,24 @@ def get_candles(interval, start_time, end_time=None):
     df["close"] = pd.to_numeric(df["c"])
     df["datetime"] = pd.to_datetime(pd.to_numeric(df["t"]), unit="ms", utc=True)
     df = df.sort_values("t").drop_duplicates(subset=["t"])
-    price = float(df.iloc[-1]["close"])
-    ts = df.iloc[-1]["datetime"].strftime("%Y-%m-%d %H:%M UTC")
+    current_price = float(df.iloc[-1]["close"])
+    current_time = df.iloc[-1]["datetime"].strftime("%Y-%m-%d %H:%M UTC")
     if len(df) > 1:
         df = df.iloc[:-1].copy()
     df.reset_index(drop=True, inplace=True)
-    return df, price, ts
+    return df, current_price, current_time
 
 
 def add_wave(df):
-    out = df.copy()
-    out["W_HIGH"] = out["high"].ewm(span=WAVE_PERIOD, adjust=False).mean()
-    out["W_MID"] = out["close"].ewm(span=WAVE_PERIOD, adjust=False).mean()
-    out["W_LOW"] = out["low"].ewm(span=WAVE_PERIOD, adjust=False).mean()
-    mid = out["W_MID"]
-    out["SLOPE"] = ((mid / mid.shift(WAVE_LOOKBACK)) - 1) * 100
-    out["ANGLE"] = out["SLOPE"].apply(
+    df["W_HIGH"] = df["high"].ewm(span=WAVE_PERIOD, adjust=False).mean()
+    df["W_MID"] = df["close"].ewm(span=WAVE_PERIOD, adjust=False).mean()
+    df["W_LOW"] = df["low"].ewm(span=WAVE_PERIOD, adjust=False).mean()
+    mid = df["W_MID"]
+    df["SLOPE"] = ((mid / mid.shift(WAVE_LOOKBACK)) - 1) * 100
+    df["ANGLE"] = df["SLOPE"].apply(
         lambda x: 0.0 if pd.isna(x) else math.degrees(math.atan(x / WAVE_LOOKBACK))
     )
-    return out
+    return df
 
 
 def is_htf(tf):
@@ -137,7 +137,7 @@ def clock_regime(slope, tf):
     return "DOWN_WEAK", "🔴 BAIXA FRACA"
 
 
-def price_pos(row):
+def price_vs_wave(row):
     if row["close"] > row["W_HIGH"]:
         return "ABOVE", "Acima da onda"
     if row["close"] < row["W_LOW"]:
@@ -153,13 +153,43 @@ def side_of(regime):
     return "FLAT"
 
 
+def decidir(d1, h4, h1):
+    r1d = d1.get("regime", "NONE")
+    r4 = h4.get("regime", "NONE")
+    s1d = side_of(r1d)
+    s1 = side_of(h1.get("regime", "NONE"))
+
+    if r4 == "FLAT" or r1d == "FLAT":
+        return "AGUARDAR", "Onda maior deitada (3h). Relogio pede para nao operar."
+
+    if r4 == "UP_STRONG" and s1d != "DOWN":
+        if h1.get("pullback_buy"):
+            return "COMPRAR", "1D/4h apontam alta e o 1h voltou para a onda."
+        if s1 == "DOWN":
+            return "AGUARDAR", "4h em 12-2, mas 1h ainda aponta baixo. Esperar o recuo terminar."
+        return "COMPRAR", "Relogio maior em 12-2. Preferir recuo na onda do 1h."
+
+    if r4 == "DOWN_STRONG" and s1d != "UP":
+        if h1.get("pullback_sell"):
+            return "VENDER", "1D/4h apontam baixa e o 1h voltou para a onda."
+        if s1 == "UP":
+            return "AGUARDAR", "4h em 4-6, mas 1h ainda aponta alta. Esperar o recuo terminar."
+        return "VENDER", "Relogio maior em 4-6. Preferir recuo na onda do 1h."
+
+    if r4 == "UP_WEAK" and s1d == "UP":
+        return "AGUARDAR", "Alta existe, mas o 4h ainda nao e 12-2."
+    if r4 == "DOWN_WEAK" and s1d == "DOWN":
+        return "AGUARDAR", "Baixa existe, mas o 4h ainda nao e 4-6."
+    return "AGUARDAR", "Relogios desalinhados. Sem vantagem clara de direcao."
+
+
 def analyze(df, tf):
     df = add_wave(df)
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
     regime, label = clock_regime(last["SLOPE"], tf)
-    pos, pos_label = price_pos(last)
-    prev_pos, _ = price_pos(prev)
+    pos, pos_label = price_vs_wave(last)
+    prev_pos, _ = price_vs_wave(prev)
     flat, strong = cuts_for(tf)
 
     pullback_buy = prev_pos == "ABOVE" and pos == "INSIDE" and last["close"] > last["W_MID"]
@@ -188,6 +218,7 @@ def analyze(df, tf):
         "candles": len(df),
         "first": df["datetime"].iloc[0].strftime("%Y-%m-%d %H:%M UTC"),
         "last": df["datetime"].iloc[-1].strftime("%Y-%m-%d %H:%M UTC"),
+        "close": round(float(last["close"]), 6),
         "w_high": round(float(last["W_HIGH"]), 6),
         "w_mid": round(float(last["W_MID"]), 6),
         "w_low": round(float(last["W_LOW"]), 6),
@@ -206,37 +237,6 @@ def analyze(df, tf):
         "stop_buy": round(float(min(last["W_LOW"], last["low"])), 6),
         "stop_sell": round(float(max(last["W_HIGH"], last["high"])), 6),
     }
-
-
-def decidir(d1, h4, h1):
-    r1d = d1.get("regime", "NONE")
-    r4 = h4.get("regime", "NONE")
-    s1d = side_of(r1d)
-    s1 = side_of(h1.get("regime", "NONE"))
-
-    if r4 == "FLAT" or r1d == "FLAT":
-        return "AGUARDAR", "Onda maior deitada (3h). Relogio pede para nao operar."
-
-    if r4 == "UP_STRONG" and s1d != "DOWN":
-        if h1.get("pullback_buy"):
-            return "COMPRAR", "1D/4h apontam alta e o 1h voltou para a onda. Maior probabilidade de continuacao de alta."
-        if s1 == "DOWN":
-            return "AGUARDAR", "4h em 12-2, mas 1h ainda aponta baixo. Esperar o recuo terminar."
-        return "COMPRAR", "Relogio maior em 12-2. Probabilidade maior de o preco seguir para cima. Preferir recuo na onda do 1h."
-
-    if r4 == "DOWN_STRONG" and s1d != "UP":
-        if h1.get("pullback_sell"):
-            return "VENDER", "1D/4h apontam baixa e o 1h voltou para a onda. Maior probabilidade de continuacao de baixa."
-        if s1 == "UP":
-            return "AGUARDAR", "4h em 4-6, mas 1h ainda aponta alta. Esperar o recuo terminar."
-        return "VENDER", "Relogio maior em 4-6. Probabilidade maior de o preco seguir para baixo. Preferir recuo na onda do 1h."
-
-    if r4 == "UP_WEAK" and s1d == "UP":
-        return "AGUARDAR", "Alta existe, mas o 4h ainda nao e 12-2. Sem forcar compra."
-    if r4 == "DOWN_WEAK" and s1d == "DOWN":
-        return "AGUARDAR", "Baixa existe, mas o 4h ainda nao e 4-6. Sem forcar venda."
-
-    return "AGUARDAR", "Relogios desalinhados. Sem vantagem clara de direcao."
 
 
 def discover_1d_start():
@@ -290,7 +290,11 @@ def run_scan():
             f"{d['leitura']}"
         )
 
-    acao, motivo = decidir(results.get("1d", {}), results.get("4h", {}), results.get("1h", {}))
+    acao, motivo = decidir(
+        results.get("1d", {}),
+        results.get("4h", {}),
+        results.get("1h", {}),
+    )
     if acao == "COMPRAR":
         acao_txt = "🟢 COMPRAR"
     elif acao == "VENDER":
