@@ -12,7 +12,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TIMEFRAMES = ["1d", "4h", "1h"]
-TF_WEIGHT = {"1h": 1, "4h": 2, "1d": 3}
 INTERVAL_MS = {
     "1h": 60 * 60 * 1000,
     "4h": 4 * 60 * 60 * 1000,
@@ -22,8 +21,19 @@ INTERVAL_MS = {
 MAX_CANDLES_PER_REQUEST = 4999
 WAVE_PERIOD = 34
 WAVE_LOOKBACK = 8
-FLAT_PCT = 0.35
-STRONG_PCT = 1.20
+
+THRESH = {
+    "1h": {"flat": 0.40, "strong": 1.60},
+    "4h": {"flat": 0.90, "strong": 3.00},
+    "1d": {"flat": 2.00, "strong": 12.00},
+}
+
+ALLOW_WEAK_TREND = False
+ONLY_BUY = True
+BLOCK_IF_DAILY_FLAT = False
+BLOCK_IF_DAILY_AGAINST = True
+LEVERAGE = 5.0
+MAINT_MARGIN = 0.01
 
 
 def notify(text):
@@ -104,7 +114,6 @@ def get_candles(interval, start_time, end_time=None):
     current_price = float(df.iloc[-1]["close"])
     current_time = df.iloc[-1]["datetime"].strftime("%Y-%m-%d %H:%M UTC")
 
-    # ignora candle em formação
     if len(df) > 1:
         df = df.iloc[:-1].copy()
     df.reset_index(drop=True, inplace=True)
@@ -115,7 +124,6 @@ def add_wave(df):
     df["W_HIGH"] = df["high"].ewm(span=WAVE_PERIOD, adjust=False).mean()
     df["W_MID"] = df["close"].ewm(span=WAVE_PERIOD, adjust=False).mean()
     df["W_LOW"] = df["low"].ewm(span=WAVE_PERIOD, adjust=False).mean()
-
     mid = df["W_MID"]
     df["SLOPE"] = ((mid / mid.shift(WAVE_LOOKBACK)) - 1) * 100
     df["ANGLE"] = df["SLOPE"].apply(
@@ -124,23 +132,22 @@ def add_wave(df):
     return df
 
 
-def clock_regime(slope):
+def clock_regime(slope, tf):
     if pd.isna(slope):
         return "NONE", "⚪ Sem dados"
 
-    if abs(slope) < FLAT_PCT:
-        return "FLAT", "⚪ 3h Horizontal — PARE"
+    flat = THRESH[tf]["flat"]
+    strong = THRESH[tf]["strong"]
 
-    if slope >= STRONG_PCT:
+    if abs(slope) < flat:
+        return "FLAT", "⚪ 3h Horizontal"
+    if slope >= strong:
         return "UP_STRONG", "🟢 12-2 Alta forte"
-
     if slope > 0:
         return "UP_WEAK", "🟡 2-4 Alta fraca"
-
-    if slope <= -STRONG_PCT:
+    if slope <= -strong:
         return "DOWN_STRONG", "🔴 4-6 Baixa forte"
-
-    return "DOWN_WEAK", "🟠 4h Baixa fraca"
+    return "DOWN_WEAK", "🟠 Baixa fraca"
 
 
 def price_vs_wave(row):
@@ -151,55 +158,54 @@ def price_vs_wave(row):
     return "INSIDE", "Dentro da onda"
 
 
-def analyze(df):
+def bullish(regime):
+    return regime == "UP_STRONG" if not ALLOW_WEAK_TREND else regime in ("UP_STRONG", "UP_WEAK")
+
+
+def bearish(regime):
+    return regime == "DOWN_STRONG" if not ALLOW_WEAK_TREND else regime in ("DOWN_STRONG", "DOWN_WEAK")
+
+
+def analyze(df, tf):
     df = add_wave(df)
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
 
-    regime, label = clock_regime(last["SLOPE"])
+    regime, label = clock_regime(last["SLOPE"], tf)
     pos, pos_label = price_vs_wave(last)
+    prev_pos, _ = price_vs_wave(prev)
 
-    # pullback: veio de fora e voltou para a onda
     pullback_buy = (
-        regime in ("UP_STRONG", "UP_WEAK")
+        prev_pos == "ABOVE"
         and pos == "INSIDE"
-        and prev["close"] > prev["W_HIGH"]
+        and last["close"] > last["W_MID"]
     )
     pullback_sell = (
-        regime in ("DOWN_STRONG", "DOWN_WEAK")
+        prev_pos == "BELOW"
         and pos == "INSIDE"
-        and prev["close"] < prev["W_LOW"]
+        and last["close"] < last["W_MID"]
     )
 
-    # regra fiel da Raghee:
-    # tendência forte + recuo na onda = setup
-    # onda horizontal = não opera
     if regime == "FLAT":
         bias = "WAIT"
-        setup = "Nenhum — onda horizontal"
-    elif regime == "UP_STRONG" and pos in ("INSIDE", "ABOVE"):
+        setup = "Onda horizontal"
+    elif bullish(regime) and pullback_buy:
         bias = "BUY"
-        setup = "Compra em pullback/continuidade da onda"
-    elif regime == "DOWN_STRONG" and pos in ("INSIDE", "BELOW"):
+        setup = "Pullback ABOVE → INSIDE"
+    elif (not ONLY_BUY) and bearish(regime) and pullback_sell:
         bias = "SELL"
-        setup = "Venda em pullback/continuidade da onda"
-    elif regime == "UP_WEAK":
+        setup = "Pullback BELOW → INSIDE"
+    elif bullish(regime) and pos == "ABOVE":
         bias = "WAIT"
-        setup = "Alta fraca — não forçar"
-    elif regime == "DOWN_WEAK":
+        setup = "Alta forte, sem pullback"
+    elif bullish(regime) and pos == "INSIDE":
         bias = "WAIT"
-        setup = "Baixa fraca — não forçar"
+        setup = "Dentro da onda, sem origem ABOVE"
     else:
         bias = "WAIT"
-        setup = "Sem alinhamento"
+        setup = "Sem setup"
 
-    if pullback_buy:
-        bias = "BUY"
-        setup = "Pullback na onda de alta"
-    if pullback_sell:
-        bias = "SELL"
-        setup = "Pullback na onda de baixa"
-
+    stop = float(min(last["W_LOW"], last["low"]))
     return {
         "candles": len(df),
         "first": df["datetime"].iloc[0].strftime("%Y-%m-%d %H:%M UTC"),
@@ -218,6 +224,7 @@ def analyze(df):
         "setup": setup,
         "pullback_buy": bool(pullback_buy),
         "pullback_sell": bool(pullback_sell),
+        "stop": round(stop, 6),
     }
 
 
@@ -236,7 +243,7 @@ def run_scan():
 
     try:
         history_start, df_1d, price_1d, time_1d = discover_1d_start()
-        data = analyze(df_1d)
+        data = analyze(df_1d, "1d")
         data["current_price"] = price_1d
         data["current_time"] = time_1d
         results["1d"] = data
@@ -248,7 +255,7 @@ def run_scan():
     for tf in ("4h", "1h"):
         try:
             df, price, ts = get_candles(tf, history_start)
-            data = analyze(df)
+            data = analyze(df, tf)
             data["current_price"] = price
             data["current_time"] = ts
             results[tf] = data
@@ -256,8 +263,6 @@ def run_scan():
         except Exception as e:
             results[tf] = {"erro": str(e)}
 
-    buy = 0
-    sell = 0
     blocos = []
     preco = None
     horario = None
@@ -289,21 +294,36 @@ def run_scan():
             f"{d['setup']}"
         )
 
-        if d["bias"] == "BUY":
-            buy += TF_WEIGHT[tf]
-        elif d["bias"] == "SELL":
-            sell += TF_WEIGHT[tf]
+    d1 = results.get("1d", {})
+    h4 = results.get("4h", {})
+    h1 = results.get("1h", {})
 
-    daily = results.get("1d", {})
-    daily_regime = daily.get("regime", "NONE")
+    d1_regime = d1.get("regime", "NONE")
+    h4_regime = h4.get("regime", "NONE")
+    h1_ok = h1.get("pullback_buy", False)
+    h1_sell = h1.get("pullback_sell", False)
 
-    # hierarquia dela: o timeframe maior manda
-    if daily_regime == "FLAT":
-        sinal = "🟡 AGUARDAR — 1D horizontal"
-    elif buy >= 4 and daily_regime in ("UP_STRONG", "UP_WEAK"):
-        sinal = "🟢 COMPRA — onda alinhada"
-    elif sell >= 4 and daily_regime in ("DOWN_STRONG", "DOWN_WEAK"):
-        sinal = "🔴 VENDA — onda alinhada"
+    blocked = False
+    if BLOCK_IF_DAILY_FLAT and d1_regime == "FLAT":
+        blocked = True
+    if BLOCK_IF_DAILY_AGAINST and bearish(d1_regime) and bullish(h4_regime):
+        blocked = True
+
+    if blocked:
+        sinal = "🟡 AGUARDAR — 1D bloqueando"
+    elif bullish(h4_regime) and h1_ok:
+        stop = h1.get("stop")
+        liq = preco * (1 - 1 / LEVERAGE + MAINT_MARGIN) if preco else 0
+        risco = ((preco - stop) / preco * 100) if preco and stop else 0
+        sinal = (
+            "🟢 COMPRA — 4h UP_STRONG + pullback 1h\n"
+            f"Stop 1h: {stop}\n"
+            f"Trail: W_LOW 1h = {h1.get('w_low')}\n"
+            f"Liq. ~{LEVERAGE:.0f}x: {liq:.6f}\n"
+            f"Risco até o stop: {risco:.2f}%"
+        )
+    elif (not ONLY_BUY) and bearish(h4_regime) and h1_sell:
+        sinal = "🔴 VENDA — 4h DOWN_STRONG + pullback 1h"
     else:
         sinal = "🟡 AGUARDAR"
 
@@ -312,8 +332,7 @@ def run_scan():
     notify(
         f"<b>{ASSET_NAME} RELÓGIO RAGHEE</b>\n"
         f"{sinal}\n"
-        f"Preço: {preco} | {horario}\n"
-        f"BUY={buy} | SELL={sell}"
+        f"Preço: {preco} | {horario}"
         + "".join(blocos)
     )
     print("=================================\n")
