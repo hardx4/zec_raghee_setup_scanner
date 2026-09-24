@@ -22,10 +22,16 @@ MAX_CANDLES_PER_REQUEST = 4999
 WAVE_PERIOD = 34
 WAVE_LOOKBACK = 8
 
+# Igual ao painel do Pine
+HTF_FLAT = 0.9      # 4h ou acima
+HTF_STRONG = 2.0
+LTF_FLAT = 0.40     # abaixo de 4h
+LTF_STRONG = 1.50
+
 THRESH = {
-    "1h": {"flat": 0.40, "strong": 1.60},
-    "4h": {"flat": 0.90, "strong": 3.00},
-    "1d": {"flat": 2.00, "strong": 12.00},
+    "1h": {"flat": LTF_FLAT, "strong": LTF_STRONG},
+    "4h": {"flat": HTF_FLAT, "strong": HTF_STRONG},
+    "1d": {"flat": HTF_FLAT, "strong": HTF_STRONG},
 }
 
 ALLOW_WEAK_TREND = False
@@ -132,12 +138,21 @@ def add_wave(df):
     return df
 
 
+def is_htf(tf):
+    return INTERVAL_MS[tf] >= 4 * 60 * 60 * 1000
+
+
+def cuts_for(tf):
+    if is_htf(tf):
+        return HTF_FLAT, HTF_STRONG
+    return LTF_FLAT, LTF_STRONG
+
+
 def clock_regime(slope, tf):
     if pd.isna(slope):
         return "NONE", "⚪ Sem dados"
 
-    flat = THRESH[tf]["flat"]
-    strong = THRESH[tf]["strong"]
+    flat, strong = cuts_for(tf)
 
     if abs(slope) < flat:
         return "FLAT", "⚪ 3h Horizontal"
@@ -174,6 +189,8 @@ def analyze(df, tf):
     regime, label = clock_regime(last["SLOPE"], tf)
     pos, pos_label = price_vs_wave(last)
     prev_pos, _ = price_vs_wave(prev)
+    flat, strong = cuts_for(tf)
+    grupo = "4h+" if is_htf(tf) else "<4h"
 
     pullback_buy = (
         prev_pos == "ABOVE"
@@ -225,6 +242,9 @@ def analyze(df, tf):
         "pullback_buy": bool(pullback_buy),
         "pullback_sell": bool(pullback_sell),
         "stop": round(stop, 6),
+        "grupo": grupo,
+        "flat": flat,
+        "strong": strong,
     }
 
 
@@ -278,7 +298,7 @@ def run_scan():
             preco = d["current_price"]
             horario = d["current_time"]
 
-        print(f"\n{tf}")
+        print(f"\n{tf} | grupo {d['grupo']} | flat={d['flat']} strong={d['strong']}")
         print(f"🕯️ {d['candles']} | {d['first']} → {d['last']}")
         print(f"💰 {d['current_price']} | {d['current_time']}")
         print(f"🕒 {d['label']} | {d['pos_label']}")
@@ -287,7 +307,7 @@ def run_scan():
         print(f"Setup: {d['setup']} | bias={d['bias']}")
 
         blocos.append(
-            f"\n<b>{tf}</b>\n"
+            f"\n<b>{tf}</b> ({d['grupo']} {d['flat']}/{d['strong']})\n"
             f"{d['label']}\n"
             f"{d['pos_label']}\n"
             f"slope={d['slope']}% | ângulo={d['angle']}°\n"
